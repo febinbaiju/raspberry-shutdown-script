@@ -12,7 +12,7 @@ SMARTTHINGS_PAT = os.getenv("SMARTTHINGS_PAT")
 VIRTUAL_SWITCH_ID = os.getenv("VIRTUAL_SWITCH_ID")
 REAL_PLUG_ID = os.getenv("REAL_PLUG_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 5))
-SHUTDOWN_DELAY = int(os.getenv("SHUTDOWN_DELAY", 60))
+SHUTDOWN_DELAY = int(os.getenv("SHUTDOWN_DELAY", 10))
 
 HEADERS = {
     "Authorization": f"Bearer {SMARTTHINGS_PAT}",
@@ -40,8 +40,8 @@ def send_command(device_id, command):
     return r.ok
 
 def schedule_shutdown():
-    print("Scheduling shutdown in 1 minute...")
-    subprocess.call(['sudo', 'shutdown', '+1'])
+    print("Shutting down now...")
+    subprocess.call(['sudo', 'shutdown', 'now'])
 
 # MAIN LOOP
 print("Monitoring SmartThings virtual switch for shutdown command...")
@@ -51,19 +51,11 @@ while True:
     if state == "on":
         print("Shutdown trigger detected!")
 
-        # Step 1: Schedule shutdown
-        schedule_shutdown()
-
-        # Step 2: Wait before powering off
         print(f"Waiting {SHUTDOWN_DELAY} seconds before turning off smart plug...")
         time.sleep(SHUTDOWN_DELAY)
-
-        # Step 3: Turn off smart plug
-        send_command(REAL_PLUG_ID, "off")
-
-        # Step 4: Reset virtual switch
         send_command(VIRTUAL_SWITCH_ID, "off")
-
+        time.sleep(SHUTDOWN_DELAY)
+        schedule_shutdown()
         break
 
     time.sleep(POLL_INTERVAL)
