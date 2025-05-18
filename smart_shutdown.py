@@ -2,47 +2,43 @@ import requests
 import time
 import subprocess
 import os
-import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Load env vars
-CLIENT_ID = os.getenv("SMARTTHINGS_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SMARTTHINGS_CLIENT_SECRET")
+TOKEN_SERVER_URL = os.getenv("SMARTTHINGS_TOKEN_SERVER_URL")
 VIRTUAL_SWITCH_ID = os.getenv("VIRTUAL_SWITCH_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 5))
 SHUTDOWN_DELAY = int(os.getenv("SHUTDOWN_DELAY", 10))
-TOKEN_FILE = os.getenv("SMARTTHINGS_TOKEN_FILE", "tokens.json")
 
 MAX_RETRIES = 5
-RETRY_DELAY = 3
+RETRY_DELAY = 3  # seconds
 
-def load_tokens():
-    with open(TOKEN_FILE, "r") as f:
-        return json.load(f)
-
-def save_tokens(data):
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(data, f)
-
-def refresh_token():
-    tokens = load_tokens()
-    data = {
-        "grant_type": "refresh_token",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "refresh_token": tokens["refresh_token"]
-    }
-    response = requests.post("https://auth-global.api.smartthings.com/oauth/token", data=data)
-    response.raise_for_status()
-    new_tokens = response.json()
-    save_tokens(new_tokens)
-    return new_tokens["access_token"]
+def fetch_token_info():
+    if not TOKEN_SERVER_URL:
+        raise ValueError("SMARTTHINGS_TOKEN_SERVER_URL is not set.")
+    
+    delay = RETRY_DELAY
+    for attempt in range(1, 100 + 1):
+        try:
+            response = requests.get(TOKEN_SERVER_URL, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"[Attempt {attempt}] Failed to fetch token info: {e}")
+            if attempt == 100:
+                raise
+            print(f"Retrying in {delay} seconds...")
+            time.sleep(delay)
+            delay *= 2  # Exponential backoff
 
 def get_access_token():
-    tokens = load_tokens()
-    return tokens["access_token"]
+    token_info = fetch_token_info()
+    access_token = token_info.get("access_token")
+    if not access_token:
+        raise ValueError("access_token not found in token info.")
+    return access_token
 
 def get_headers():
     token = get_access_token()
@@ -57,14 +53,14 @@ def safe_request(method, url, **kwargs):
         try:
             r = requests.request(method, url, headers=headers, timeout=10, **kwargs)
             if r.status_code == 401:
-                print("Access token expired, refreshing...")
-                new_token = refresh_token()
-                headers["Authorization"] = f"Bearer {new_token}"
-                r = requests.request(method, url, headers=headers, timeout=10, **kwargs)
+                print("Unauthorized (401) - token may be invalid.")
             r.raise_for_status()
             return r
         except Exception as e:
             print(f"[Attempt {attempt}] Request failed: {e}")
+            if attempt == MAX_RETRIES:
+                print("Max retries reached, giving up.")
+                return None
             time.sleep(RETRY_DELAY)
     return None
 
@@ -72,7 +68,10 @@ def get_switch_state(device_id):
     url = f"https://api.smartthings.com/v1/devices/{device_id}/status"
     r = safe_request("GET", url)
     if r:
-        return r.json()["components"]["main"]["switch"]["switch"]["value"]
+        try:
+            return r.json()["components"]["main"]["switch"]["switch"]["value"]
+        except Exception as e:
+            print(f"Error parsing switch state: {e}")
     return None
 
 def send_command(device_id, command):
@@ -98,18 +97,25 @@ def schedule_shutdown():
 print("Monitoring SmartThings virtual switch for shutdown command...")
 
 while True:
-    state = get_switch_state(VIRTUAL_SWITCH_ID)
-    if state == "on":
-        print("Shutdown trigger detected!")
-        print(f"Waiting {SHUTDOWN_DELAY} seconds before turning off the virtual switch...")
-        time.sleep(SHUTDOWN_DELAY)
+    try:
+        state = get_switch_state(VIRTUAL_SWITCH_ID)
+        if state == "on":
+            print("Shutdown trigger detected!")
+            print(f"Waiting {SHUTDOWN_DELAY} seconds before turning off the virtual switch...")
+            time.sleep(SHUTDOWN_DELAY)
 
-        send_command(VIRTUAL_SWITCH_ID, "off")
+            send_command(VIRTUAL_SWITCH_ID, "off")
 
-        print(f"Waiting another {SHUTDOWN_DELAY} seconds before shutting down...")
-        time.sleep(SHUTDOWN_DELAY)
+            print(f"Waiting another {SHUTDOWN_DELAY} seconds before shutting down...")
+            time.sleep(SHUTDOWN_DELAY)
 
-        schedule_shutdown()
+            schedule_shutdown()
+            break
+
+        time.sleep(POLL_INTERVAL)
+    except KeyboardInterrupt:
+        print("Interrupted by user, exiting.")
         break
-
-    time.sleep(POLL_INTERVAL)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        time.sleep(POLL_INTERVAL)
